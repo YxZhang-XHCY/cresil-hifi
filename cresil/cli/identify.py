@@ -22,6 +22,16 @@ from numpy.lib.arraysetops import _unique_dispatcher
 from networkx.drawing.nx_agraph import to_agraph
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
+# Platform-specific configurations
+PLATFORM_CONFIG = {
+    "ont": {
+        "use_medaka": True,
+    },
+    "hifi": {
+        "use_medaka": False,  # HiFi has high accuracy, skip sequence correction
+    }
+}
+
 #####################################################################
 ## utility fuctions #################################################
 
@@ -365,6 +375,9 @@ def argparser():
         add_help=False,
         description='Identify and verify eccDNA from enriched data')
     general = parser.add_argument_group(title='General options')
+    general.add_argument('-platform', "--platform", dest='platform',
+                            help="sequencing platform: ont or hifi [ont]",
+                            type=str, choices=['ont', 'hifi'], default='ont')
     general.add_argument('-t', "--threads",
                             help="Number of threads [all CPU cores]",
                             type=int, default=0)
@@ -399,16 +412,26 @@ def argparser():
                             help="lowest average depth of eccDNA [5]",
                             type=int, default=5)
     general.add_argument('-cm', "--consensus-model", dest='consensus_model',
-                            help="Medaka_consensus model [r1041_e82_400bps_sup_v4.3.0]",
+                            help="Medaka_consensus model (only for ONT) [r1041_e82_400bps_sup_v4.3.0]",
                             type=str, default='r1041_e82_400bps_sup_v4.3.0')
     return parser
 
 def main(args):
 
+    # Get platform configuration
+    platform = args.platform
+    config = PLATFORM_CONFIG[platform]
+
     threads = cpu_count() if args.threads == 0 else args.threads
     adj_threads = max(4, int(threads / 4))
     bed_threads = max(4, int(threads / 5))
-    skipvariant = args.skipvariant
+
+    # For HiFi platform, automatically skip Medaka (sequence correction and variant calling)
+    if platform == "hifi":
+        skipvariant = True  # HiFi has high accuracy, no need for Medaka
+    else:
+        skipvariant = args.skipvariant
+
     skipgfa = args.skipgfa
     fastaRef = args.faref
     chromSizes = args.fai
@@ -446,7 +469,9 @@ def main(args):
     ## output ###########################################################
     
     ct = datetime.datetime.now()
-    print("\n######### CReSIL : Start identifying process (thread : {})\n[{}] total trimmed region : {}".format(threads, ct, len(readTrim)), flush=True)
+    print("\n######### CReSIL : Start identifying process (platform: {}, thread: {})\n[{}] total trimmed region : {}".format(platform.upper(), threads, ct, len(readTrim)), flush=True)
+    if platform == "hifi":
+        print("[{}] HiFi mode: skipping Medaka sequence correction (high accuracy data)".format(ct), flush=True)
     if len(readTrim) == 0:
         sys.exit("[ABORT] zero trimmed region\n")
 

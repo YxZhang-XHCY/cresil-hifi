@@ -29,6 +29,20 @@ setup(
     author='Visanu Wanchai, Piroon Jenjaroenpun, Intawat Nookaew',
     author_email='visanu.wanchai@gmail.com',
     url='https://gitlab.com/visanu/cresil',
+    python_requires='>=3.8',
+    install_requires=[
+        'biopython>=1.81',
+        'mappy>=2.26',
+        'intervaltree>=3.1.0',
+        'tqdm>=4.66.1',
+        'pandas>=2.0.3',
+        'numpy',
+        'pysam>=0.21.0',
+        'pybedtools>=0.9.1',
+        'graphviz>=0.20.1',
+        'networkx>=3.1',
+        'matplotlib>=3.7.3',
+    ],
     entry_points = {
         'console_scripts': [
             '{0} = {0}:main'.format(__pkg_name__)

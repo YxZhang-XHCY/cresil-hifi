@@ -22,6 +22,16 @@ from numpy.lib.arraysetops import _unique_dispatcher
 from networkx.drawing.nx_agraph import to_agraph
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
+# Platform-specific configurations
+PLATFORM_CONFIG = {
+    "ont": {
+        "minimap2_preset": "map-ont",
+    },
+    "hifi": {
+        "minimap2_preset": "map-hifi",
+    }
+}
+
 #####################################################################
 ## utility fuctions #################################################
 
@@ -312,13 +322,16 @@ def argparser():
         add_help=False,
         description='Identify and verify eccDNA from whole-genome long-read (WGLS) sequencing data')
     general = parser.add_argument_group(title='General options')
+    general.add_argument('-platform', "--platform", dest='platform',
+                            help="sequencing platform: ont or hifi [ont]",
+                            type=str, choices=['ont', 'hifi'], default='ont')
     general.add_argument('-t', "--threads",
                             help="Number of threads [all CPU cores]",
                             type=int, default=0)
     general.add_argument('-m', "--mode", dest='mode',
                             help="mode to identify potential regions for eccDNAs : linkage or depth [depth]",
                             type=str, default='depth')
-    general.add_argument('-r', "--ref",  
+    general.add_argument('-r', "--ref",
                             help="reference Minimap2 index .mmi",
                             type=str, default=None)
     general.add_argument('-fa', "--fa-ref", dest='faref',
@@ -358,6 +371,10 @@ def argparser():
 
 def main(args):
 
+    # Get platform configuration
+    platform = args.platform
+    config = PLATFORM_CONFIG[platform]
+
     threads = cpu_count() if args.threads == 0 else args.threads
     adj_threads = max(4, int(threads / 4))
     bed_threads = max(4, int(threads / 5))
@@ -373,6 +390,9 @@ def main(args):
     windowmerge = args.windowmerge
     breakpointmerge = args.breakpointmerge
     offsetmerge = args.offsetmerge
+
+    # Get minimap2 preset based on platform
+    minimap2_preset = config["minimap2_preset"]
 
     if not args.triminput:
         sys.stderr.write("[ABORT] a table from trimming step (trim.txt) is needed\n")
@@ -401,7 +421,7 @@ def main(args):
     ## output ###########################################################
     
     ct = datetime.datetime.now()
-    print("\n######### CReSIL : Start identifying process : WGLS - {} (thread : {})\n[{}] total trimmed region : {}".format(mode, threads, ct, len(readTrim)), flush=True)
+    print("\n######### CReSIL : Start identifying process : WGLS - {} (platform: {}, thread: {})\n[{}] total trimmed region : {}".format(mode, platform.upper(), threads, ct, len(readTrim)), flush=True)
     if len(readTrim) == 0:
         sys.exit("[ABORT] zero trimmed region\n")
 
@@ -475,9 +495,9 @@ def main(args):
     else:
         ## identify potential eccDNA regions by depth
         ct = datetime.datetime.now()
-        print("[{}] identifying potential eccDNA regions by depth\n[{}] creating a BAM file".format(ct, ct), flush=True)
+        print("[{}] identifying potential eccDNA regions by depth\n[{}] creating a BAM file (using {} preset)".format(ct, ct, minimap2_preset), flush=True)
 
-        cmd = "minimap2 -t {} --no-long-join -a {} {} | samtools sort -o {}/ref_aln.bam; samtools index {}/ref_aln.bam".format(threads, fref, fastaName, tmpDir, tmpDir)
+        cmd = "minimap2 -t {} -x {} --no-long-join -a {} {} | samtools sort -o {}/ref_aln.bam; samtools index {}/ref_aln.bam".format(threads, minimap2_preset, fref, fastaName, tmpDir, tmpDir)
         process = subprocess.call(cmd, shell=True)
 
         ct = datetime.datetime.now()
@@ -833,5 +853,5 @@ def main(args):
     df_identify_summary.to_csv(eccdna_final_path, sep='\t', index=None)
 
     ct = datetime.datetime.now()
-    print("[{}] finished identifying process : WGLS - {}\n".format(ct, mode), flush=True)
+    print("[{}] finished identifying process : WGLS - {} ({})\n".format(ct, mode, platform.upper()), flush=True)
     sys.exit()

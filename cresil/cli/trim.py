@@ -15,6 +15,22 @@ from multiprocessing import cpu_count, Pool
 from Bio import SeqIO
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
+# Platform-specific configurations
+PLATFORM_CONFIG = {
+    "ont": {
+        "minimap2_preset": "map-ont",
+        "mapq_default": 30,
+        "gap_default": 10,
+        "overlap_default": 10,
+    },
+    "hifi": {
+        "minimap2_preset": "map-hifi",
+        "mapq_default": 30,
+        "gap_default": 10,
+        "overlap_default": 10,
+    }
+}
+
 def cal_feature_region(value, ini_start):
     str_ = (value['acc_length'] + ini_start) - value['length']
     end_ = value['acc_length'] + ini_start
@@ -429,30 +445,33 @@ def argparser():
     parser = ArgumentParser(
         formatter_class=ArgumentDefaultsHelpFormatter,
         add_help=False,
-        description='Find and trim potential eccDNA regions from ONT reads')
+        description='Find and trim potential eccDNA regions from long reads')
     general = parser.add_argument_group(title='General options')
+    general.add_argument('-platform', "--platform", dest='platform',
+                            help="sequencing platform: ont or hifi [ont]",
+                            type=str, choices=['ont', 'hifi'], default='ont')
     general.add_argument('-fq', "--fq-input",  dest='fqinput',
                             help="input fasta/fastq",
                             type=str, default=None)
-    general.add_argument('-mapq', "--map-quality", dest='mapq',  
-                            help="mapping quality [30]",
-                            type=int, default=30)
+    general.add_argument('-mapq', "--map-quality", dest='mapq',
+                            help="mapping quality (default: 30 for ONT, 60 for HiFi)",
+                            type=int, default=None)
     general.add_argument('-t', "--threads", dest='threads',
                             help="Number of threads [all CPU cores]",
                             type=int, default=0)
-    general.add_argument('-g', "--gap", dest='allow_gap', 
-                            help="allowing gap length [10]",
-                            type=int, default=10)
-    general.add_argument('-l', "--overlap", dest='allow_overlap', 
-                            help="allowing overlapping length [10]",
-                            type=int, default=10)
-    general.add_argument('-e', "--exclude", dest='ex_chr',  
+    general.add_argument('-g', "--gap", dest='allow_gap',
+                            help="allowing gap length (default: 10 for ONT, 5 for HiFi)",
+                            type=int, default=None)
+    general.add_argument('-l', "--overlap", dest='allow_overlap',
+                            help="allowing overlapping length (default: 10 for ONT, 5 for HiFi)",
+                            type=int, default=None)
+    general.add_argument('-e', "--exclude", dest='ex_chr',
                             help="exclude chromosome(s) separating with comma [None]",
                             type=str, default='')
-    general.add_argument('-r', "--ref",  
+    general.add_argument('-r', "--ref",
                             help="reference Minimap2 index .mmi",
                             type=str, default=None)
-    general.add_argument('-o', "--output",  
+    general.add_argument('-o', "--output",
                             help="output directory",
                             type=str, default="cresil_result")
     return parser
@@ -468,13 +487,21 @@ def main(args):
     global list_ex_chr
     global allow_gap
     global allow_overlap
+    global platform
+
+    # Get platform configuration
+    platform = args.platform
+    config = PLATFORM_CONFIG[platform]
 
     threads = cpu_count() if args.threads == 0 else args.threads
     fname = args.fqinput
     fref = args.ref
-    mapq = args.mapq
-    allow_gap = args.allow_gap
-    allow_overlap = args.allow_overlap
+
+    # Use platform-specific defaults if not specified
+    mapq = args.mapq if args.mapq is not None else config["mapq_default"]
+    allow_gap = args.allow_gap if args.allow_gap is not None else config["gap_default"]
+    allow_overlap = args.allow_overlap if args.allow_overlap is not None else config["overlap_default"]
+
     bname, ext = path.splitext(fname)
 
     list_ex_chr = []
@@ -496,7 +523,7 @@ def main(args):
     iter_ = 10000
     flag = 0
 
-    print("\n######### CReSIL : start trimming process (thread : {})".format(threads), flush=True)
+    print("\n######### CReSIL : start trimming process (platform: {}, thread: {})".format(platform.upper(), threads), flush=True)
 
     ## check a fastq index
     fname_index = "{}.fai".format(fname)
@@ -519,9 +546,13 @@ def main(args):
     ## load Aligner ############################################################
 
     MM_F_NO_LJOIN = 0x400
-    ref = mappy.Aligner(fref, preset="map-ont", extra_flags=MM_F_NO_LJOIN)  # load or build index
+    minimap2_preset = config["minimap2_preset"]
+    ref = mappy.Aligner(fref, preset=minimap2_preset, extra_flags=MM_F_NO_LJOIN)  # load or build index
     if not ref:
         raise Exception("ERROR: failed to load/build index")
+
+    ct = datetime.datetime.now()
+    print("[{}] using minimap2 preset: {}".format(ct, minimap2_preset), flush=True)
 
     ## trimming process ########################################################
     
