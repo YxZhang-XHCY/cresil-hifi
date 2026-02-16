@@ -5,8 +5,6 @@ import datetime
 import pathlib
 import subprocess
 import operator
-from turtle import right
-from xmlrpc.client import FastParser
 import pandas as pd
 import numpy as np
 import pysam, shutil
@@ -14,12 +12,9 @@ import pybedtools as bt
 import graphviz as gv
 import networkx as nx
 import matplotlib.pyplot as plt
-from itertools import chain
 from multiprocessing import cpu_count, Pool
 from Bio.Seq import Seq
 from Bio import SeqIO
-from numpy.lib.arraysetops import _unique_dispatcher
-from networkx.drawing.nx_agraph import to_agraph
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
 # Platform-specific configurations
@@ -74,7 +69,7 @@ def chk_ovl_nodes(df_final_read_mergeid, list_nodes):
     l1 = df_final_read_mergeid['mergeid'].isin(list_uniq_nodes)
     df_x = df_final_read_mergeid[l1].groupby(by='readid')[['mergeid']].nunique().sort_values(by='mergeid', ascending=False)
     list_readid = list(set(df_x[df_x['mergeid'] == len(list_uniq_nodes)].index))
-    
+
     chk_return = False
     if len(list_readid) > 0:
         df_y = df_final_read_mergeid[df_final_read_mergeid['readid'].isin(list_readid)].groupby(by='mergeid').agg({'ovl_5end':['sum'], 'ovl_3end':['sum']})
@@ -84,7 +79,7 @@ def chk_ovl_nodes(df_final_read_mergeid, list_nodes):
             list_boo.append(df_y.loc[node,'ovl_5end']['sum'] > 0)
         if all(list_boo):
             chk_return = True
-        
+
     return chk_return
 
 def chk_circular_subgraph(G, graph, dict_pair_strand):
@@ -118,10 +113,10 @@ def chk_circular_subgraph(G, graph, dict_pair_strand):
         cyclic = True if len(nx.cycle_basis(nx.DiGraph(rm_sl_subgraph).to_undirected())) > 0 else False
     else:
         cyclic = True if len(nx.cycle_basis(nx.DiGraph(graph).to_undirected())) > 0 else False
-        
+
     if not solved:
         cyclic = False
-    
+
     test_graph = graph.copy()
     test_graph.remove_edges_from(nx.selfloop_edges(test_graph))
     list_traversal = nx.cycle_basis(nx.DiGraph(test_graph).to_undirected())
@@ -142,7 +137,7 @@ def get_longest_node(chk_subgraph):
         if lenLoci(node) > lenLoci(longest_node):
             longest_node = node
     return longest_node
-    
+
 def get_dict_weight_subgraph(directed_graph, chk_subgraph):
     dict_return = {}
     for node_name in list(chk_subgraph.nodes):
@@ -186,7 +181,7 @@ def any_overlapping_range(start1, end1, start2, end2):
         return False
 
 def check_breakpoint_direction(df_check):
-    
+
     list_pairs = []
 
     df_check.reset_index(drop=True, inplace=True)
@@ -240,30 +235,28 @@ def check_breakpoint_direction(df_check):
     return list_pairs
 
 def check_abs_ovl(value):
-    
+
     cut_off=1
-    
+
     r_start = value['r_start']
     r_end = value['r_end']
     mergeid = value['mergeid']
     merge_5end = int(mergeid.split('_')[1])
     merge_3end = int(mergeid.split('_')[2])
-    
+
     ovl_5end_value = abs(r_start - merge_5end)
     ovl_3end_value = abs(r_end - merge_3end)
-    
+
     ovl_5end = 1 if ovl_5end_value <= cut_off else 0
     ovl_3end = 1 if ovl_3end_value <= cut_off else 0
     sum_ends = ovl_5end + ovl_3end
-    
+
     return ovl_5end, ovl_3end, sum_ends
 
-def cal_skip_variant(tup_value):
-
-    gname, merge_region, num_region, is_cyclic, assemGraph = tup_value
+def cal_skip_variant(gname, merge_region, num_region, is_cyclic, read_merged_ins_df):
 
     lengthLoci = lenLoci(merge_region)
-    ctc = 'True' if is_cyclic == True else 'True'
+    ctc = 'True' if is_cyclic == True else 'False'
 
     ## collect region lengths of overlapping reads
     total_base = 0
@@ -281,13 +274,9 @@ def cal_skip_variant(tup_value):
 
     expectCov = "{:.2f}".format((float(total_base) / lengthLoci))
 
-    list_tup_result = [(gname, merge_region, lengthLoci, num_region, ctc, len(set(list_readid)), total_base, expectCov)]
+    return (gname, merge_region, lengthLoci, num_region, ctc, len(set(list_readid)), total_base, expectCov)
 
-    return list_tup_result
-
-def prepare_identify_seq(tup_value):
-
-    gname, merge_region, num_region, is_cyclic, assemGraph, fastaRef, fastaName = tup_value
+def prepare_identify_seq(gname, merge_region, num_region, is_cyclic, assemGraph, fastaRef, fastaName, read_merged_ins_df):
 
     fa_ref = pysam.Fastafile(fastaRef)
     fa_reads = pysam.FastaFile(fastaName)
@@ -335,9 +324,7 @@ def prepare_identify_seq(tup_value):
 
     expectCov = "{:.2f}".format((float(total_base) / lengthLoci))
 
-    list_tup_result = [(gname, merge_region, lengthLoci, num_region, ctc, len(set(list_readid)), total_base, expectCov)]
-
-    return list_tup_result
+    return (gname, merge_region, lengthLoci, num_region, ctc, len(set(list_readid)), total_base, expectCov)
 
 def get_a_sequence(fa_path):
     seq = ''
@@ -349,7 +336,7 @@ def assemToGFA(tup_value):
     fa_path, tup_ = tup_value
     ec_id, assembly_len, coverage, ctc = tup_
     seq = get_a_sequence(fa_path)
-    
+
     gfaS = []
     gfaL = []
     if ctc == "True":
@@ -467,7 +454,7 @@ def main(args):
     pathlib.Path(assemGraph).mkdir(parents=True, exist_ok=True)
 
     ## output ###########################################################
-    
+
     ct = datetime.datetime.now()
     print("\n######### CReSIL : Start identifying process (platform: {}, thread: {})\n[{}] total trimmed region : {}".format(platform.upper(), threads, ct, len(readTrim)), flush=True)
     if platform == "hifi":
@@ -505,14 +492,14 @@ def main(args):
     merge_genomecov_df_filt = merge_genomecov_df[merge_genomecov_df['depth'] >= regiondepth]
     merge_genomecov_df = merge_genomecov_df.sort_values(['mergeid','bg_start'])
     ## group reads coverage of each mergeid and calculate mean coverage
-    merge_bg_filt = merge_genomecov_df_filt.groupby(['mergeid']).agg({'bg_chrom': np.max,'bg_start' : np.min,
-                                                           'bg_end' : np.max,'depth' : np.mean}).reset_index()
-    ## create final potential eccDNA regions and 
+    merge_bg_filt = merge_genomecov_df_filt.groupby(['mergeid']).agg(
+        {'bg_chrom': 'max', 'bg_start': 'min', 'bg_end': 'max', 'depth': 'mean'}).reset_index()
+    ## create final potential eccDNA regions and
     ## re-create mergeid based on trimming low-coverage regions
     merge_bg_filt[['bg_start','bg_end']] = merge_bg_filt[['bg_start','bg_end']].apply(pd.to_numeric, errors='coerce')
     merge_bg_filt['length'] = merge_bg_filt.bg_end - merge_bg_filt.bg_start
-    merge_bg_filt["bg_start"]= merge_bg_filt["bg_start"].astype(str) 
-    merge_bg_filt["bg_end"]= merge_bg_filt["bg_end"].astype(str) 
+    merge_bg_filt["bg_start"]= merge_bg_filt["bg_start"].astype(str)
+    merge_bg_filt["bg_end"]= merge_bg_filt["bg_end"].astype(str)
     merge_bg_filt['mergeid'] = merge_bg_filt.bg_chrom+"_"+merge_bg_filt.bg_start+"_"+merge_bg_filt.bg_end
     merge_bg_filt = merge_bg_filt.loc[:,['bg_chrom','bg_start','bg_end','depth','length','mergeid']]
 
@@ -539,8 +526,8 @@ def main(args):
     read_merged_ins_df_org = pd.read_csv("{}/reads_merge_intersect.bed".format(tmpDir),sep="\t",header=None,dtype=str)
     header = list(merge_bg_filt.columns)+list(readTrim.columns)+["ovl"]
     read_merged_ins_df_org.columns = header
-    header_select = ['ref','r_start','r_end','mergeid','depth','length','readid', 
-                     'q_start','q_end','match','mapBlock','mapq','strand','qlenTrimmed', 
+    header_select = ['ref','r_start','r_end','mergeid','depth','length','readid',
+                     'q_start','q_end','match','mapBlock','mapq','strand','qlenTrimmed',
                      'freqCov','order','ovl']
     read_merged_ins_df_org = read_merged_ins_df_org[header_select]
     ## Assign readid to each potential eccDNA regions (mergeid) #########
@@ -564,11 +551,10 @@ def main(args):
     bt_5end = bt.BedTool("{}/end5_merge_region.bed".format(tmpDir))
     bt_3end = bt.BedTool("{}/end3_merge_region.bed".format(tmpDir))
     ## Annotate each read that has 5'end and 3'end overlap
-    ## add column ovl_5end and ovl_3end (0=no overlap, 1=presence of overlap) 
+    ## add column ovl_5end and ovl_3end (0=no overlap, 1=presence of overlap)
     read_merged_ins_df_org_bt = bt.BedTool.from_dataframe(read_merged_ins_df_org)
     read_merged_final_bt = read_merged_ins_df_org_bt.annotate(files=["{}/end5_merge_region.bed".format(tmpDir),"{}/end3_merge_region.bed".format(tmpDir)], counts=True)
 
-    global read_merged_ins_df
     read_merged_ins_df = read_merged_final_bt.to_dataframe(names=header_select + ['ovl_5end','ovl_3end'])
     ## sum 5'end and 3'end overlap (0=no overlap, 1=either 5'end or 5'end overlap, 2=both ends overlap)
     read_merged_ins_df['sum_ends'] = read_merged_ins_df.ovl_5end + read_merged_ins_df.ovl_3end
@@ -586,16 +572,16 @@ def main(args):
     graph = {}
 
     for readid, group in read_merged_ins_df.groupby(by='readid'):
-        
+
         df_check = group.sort_values(by='order').copy()
         df_check.reset_index(drop=True, inplace=True)
-        
+
         if len(df_check) > 1:
             for tup_result in check_breakpoint_direction(df_check):
                 if tup_result[3] == True:
 
                     repr_mergeid = repr([tup_result[0], tup_result[1]])
-                    
+
                     if repr_mergeid in dict_pair_strand.keys():
                         dict_pair_strand[repr_mergeid].add(tup_result[2])
                     else:
@@ -630,7 +616,7 @@ def main(args):
         gname = "ec{}".format(idx + 1)
 
         regions, num_nodes, can_be_solved, contain_selfloop, is_cyclic = chk_circular_subgraph(G, graph, dict_pair_strand)
-        
+
         if len(nodes) == 1:
             select_repr = repr([nodes[0], nodes[0]])
             regions = "{}_{}".format(eval(select_repr)[0], list(dict_pair_strand[select_repr])[0][0])
@@ -638,17 +624,17 @@ def main(args):
         elif len(nodes) == 2:
             select_repr = repr(nodes)
             list_region = eval(select_repr)
-            
+
             if not select_repr in dict_pair_strand.keys():
                 select_repr = repr(nodes[::-1])
-                
+
             list_strand = list(dict_pair_strand[select_repr])[0].split('_')
             regions = ','.join("{}_{}".format(x[0], x[1]) for x in list(zip(list_region, list_strand)))
-            
+
         else:
             test_graph = graph.copy()
             test_graph.remove_edges_from(nx.selfloop_edges(test_graph))
-            
+
             list_traversal = nx.cycle_basis(nx.DiGraph(test_graph).to_undirected())
             if len(list_traversal) == 0:
                 regions = ','.join(["{}_{}".format(node, dict_majority_strand[node]) for node in nodes])
@@ -689,11 +675,11 @@ def main(args):
                                 list_traverse[index].append(list_[1])
 
                 regions = ','.join(max(list_traverse, key=len))
-        
+
         tup_graph_summary = (gname, regions, num_nodes, can_be_solved, contain_selfloop, is_cyclic)
-        
+
         list_graph_summary.append(tup_graph_summary)
-        
+
     if len(list_graph_summary) > 0:
         header = ['id', 'regions', 'num_nodes', 'can_be_solved', 'contain_selfloop', 'is_cyclic']
         df_graph_summary = pd.DataFrame(list_graph_summary, columns=header)
@@ -702,53 +688,22 @@ def main(args):
 
     ## if skip sequence correction and variant calling steps
     if skipvariant:
-    
+
         ct = datetime.datetime.now()
         print("[{}] skipped sequence correction and variant calling steps\n[{}] collecting data from subgraphs : {}".format(ct, ct, len(subgraphs)), flush=True)
 
         list_identify_results = []
-        list_tup_value = []
-        iter_ = 100
 
         for counter, (idx, value) in enumerate(df_graph_summary.iterrows(), start=1):
 
-            if counter % iter_ == 0:
+            if counter % 100 == 0:
                 ct = datetime.datetime.now()
                 print("[{}] {}".format(ct, counter), flush=True)
 
-            if counter % iter_ == 0:
-                gname = value['id']
-                merge_region = value['regions']
-                num_region = value['num_nodes']
-                is_cyclic = value['is_cyclic']
-
-                tup_value = (gname, merge_region, num_region, is_cyclic, assemGraph)
-                list_tup_value.append(tup_value)
-
-                pool = Pool(processes = threads)
-                list_pool_result = pool.map(cal_skip_variant, list_tup_value)
-                pool.close()
-                pool.join()
-
-                list_identify_results += list(chain.from_iterable(list_pool_result))
-
-                list_tup_value = []
-            else:
-                gname = value['id']
-                merge_region = value['regions']
-                num_region = value['num_nodes']
-                is_cyclic = value['is_cyclic']
-
-                tup_value = (gname, merge_region, num_region, is_cyclic, assemGraph)
-                list_tup_value.append(tup_value)
-
-        if len(list_tup_value) > 0:
-            pool = Pool(processes = threads)
-            list_pool_result = pool.map(cal_skip_variant, list_tup_value)
-            pool.close()
-            pool.join()
-
-            list_identify_results += list(chain.from_iterable(list_pool_result))
+            result = cal_skip_variant(
+                value['id'], value['regions'], value['num_nodes'], value['is_cyclic'],
+                read_merged_ins_df)
+            list_identify_results.append(result)
 
         ## write a subGraph summary file
         header = ['id', 'merge_region', 'merge_len', 'num_region', 'ctc', 'numreads', 'totalbase', 'coverage']
@@ -776,49 +731,18 @@ def main(args):
     print("[{}] preparing data for correcting sequences from subgraphs : {}".format(ct, len(subgraphs)), flush=True)
 
     list_identify_results = []
-    list_tup_value = []
-    iter_ = 100
 
     for counter, (idx, value) in enumerate(df_graph_summary.iterrows(), start=1):
 
-        if counter % iter_ == 0:
+        if counter % 100 == 0:
             ct = datetime.datetime.now()
             print("[{}] {}".format(ct, counter), flush=True)
 
-        if counter % iter_ == 0:
-            gname = value['id']
-            merge_region = value['regions']
-            num_region = value['num_nodes']
-            is_cyclic = value['is_cyclic']
+        result = prepare_identify_seq(
+            value['id'], value['regions'], value['num_nodes'], value['is_cyclic'],
+            assemGraph, fastaRef, fastaName, read_merged_ins_df)
+        list_identify_results.append(result)
 
-            tup_value = (gname, merge_region, num_region, is_cyclic, assemGraph, fastaRef, fastaName)
-            list_tup_value.append(tup_value)
-
-            pool = Pool(processes = bed_threads)
-            list_pool_result = pool.map(prepare_identify_seq, list_tup_value)
-            pool.close()
-            pool.join()
-
-            list_identify_results += list(chain.from_iterable(list_pool_result))
-
-            list_tup_value = []
-        else:
-            gname = value['id']
-            merge_region = value['regions']
-            num_region = value['num_nodes']
-            is_cyclic = value['is_cyclic']
-
-            tup_value = (gname, merge_region, num_region, is_cyclic, assemGraph, fastaRef, fastaName)
-            list_tup_value.append(tup_value)
-
-    if len(list_tup_value) > 0:
-        pool = Pool(processes = bed_threads)
-        list_pool_result = pool.map(prepare_identify_seq, list_tup_value)
-        pool.close()
-        pool.join()
-
-        list_identify_results += list(chain.from_iterable(list_pool_result))
-    
     ## add parameters for Medaka
     list_params = []
     list_chk_consensus = []
@@ -869,35 +793,15 @@ def main(args):
     ct = datetime.datetime.now()
     print("[{}] running sequence correction".format(ct), flush=True)
 
-    list_tup_params = []
-    iter_ = 100
+    list_medaka_cmds = []
+    for tup in list_params:
+        cmd = "medaka_consensus -i {} -d {} -o {} -m {} >/dev/null 2>&1".format(tup[0], tup[1], tup[2], tup[3])
+        list_medaka_cmds.append(cmd)
 
-    for counter, tup in enumerate(list_params, start=1):
-
-        if counter % iter_ == 0:
-            ct = datetime.datetime.now()
-            print("[{}] {}".format(ct, counter), flush=True)
-
-        if counter % iter_ == 0:
-            cmd = "medaka_consensus -i {} -d {} -o {} -m {} >/dev/null 2>&1".format(tup[0], tup[1], tup[2], tup[3])
-            list_tup_params.append(cmd)
-
-            pool = Pool(processes = adj_threads)
-            exit_codes = pool.map(dist_work, list_tup_params)
-            pool.close()
-            pool.join()
-
-            list_tup_params = []
-
-        else:
-            cmd = "medaka_consensus -i {} -d {} -o {} -m {} >/dev/null 2>&1".format(tup[0], tup[1], tup[2], tup[3])
-            list_tup_params.append(cmd)
-
-    if len(list_tup_params) > 0:
-        pool = Pool(processes = adj_threads)
-        exit_codes = pool.map(dist_work, list_tup_params)
-        pool.close()
-        pool.join()
+    pool = Pool(processes=adj_threads)
+    pool.map(dist_work, list_medaka_cmds)
+    pool.close()
+    pool.join()
 
     ## copy corrected sequences
     dict_medaka_seq_len = {}
@@ -905,7 +809,7 @@ def main(args):
         consensus_path, dest_path = tup_consensus
         if os.path.isfile(consensus_path):
             shutil.copy(consensus_path, dest_path)
-            
+
             seq_len = get_fasta_length(dest_path)
             key_seq = dest_path.split('/')[-1].split('_consensus')[0]
             dict_medaka_seq_len[key_seq] = seq_len
@@ -914,42 +818,22 @@ def main(args):
     ct = datetime.datetime.now()
     print("[{}] running variant calling".format(ct), flush=True)
 
-    list_tup_params = []
-    iter_ = 100
+    list_variant_cmds = []
+    for tup in list_params:
+        cmd = "medaka variant --quiet {} {} {}".format(tup[1], tup[4], tup[5])
+        list_variant_cmds.append(cmd)
 
-    for counter, tup in enumerate(list_params, start=1):
-
-        if counter % iter_ == 0:
-            ct = datetime.datetime.now()
-            print("[{}] {}".format(ct, counter), flush=True)
-        
-        if counter % iter_ == 0:
-            cmd = "medaka variant --quiet {} {} {}".format(tup[1], tup[4], tup[5])
-            list_tup_params.append(cmd)
-
-            pool = Pool(processes = adj_threads)
-            exit_codes = pool.map(dist_work, list_tup_params)
-            pool.close()
-            pool.join()
-
-            list_tup_params = []
-
-        else:
-            cmd = "medaka variant --quiet {} {} {}".format(tup[1], tup[4], tup[5])
-            list_tup_params.append(cmd)
-
-    if len(list_tup_params) > 0:
-        pool = Pool(processes = adj_threads)
-        exit_codes = pool.map(dist_work, list_tup_params)
-        pool.close()
-        pool.join()
+    pool = Pool(processes=adj_threads)
+    pool.map(dist_work, list_variant_cmds)
+    pool.close()
+    pool.join()
 
     ## copy variant results
     for tup_variant in list_chk_variant:
         variant_path, dest_path = tup_variant
         if os.path.isfile(variant_path):
             shutil.copy(variant_path, dest_path)
-    
+
     ## write identified eccDNA summary
     header = ['id', 'merge_region', 'merge_len', 'num_region', 'ctc', 'numreads', 'totalbase', 'coverage']
     df_identify_summary = pd.DataFrame(list_identify_results, columns=header)
@@ -967,52 +851,14 @@ def main(args):
         ct = datetime.datetime.now()
         print("[{}] creating GFA files".format(ct), flush=True)
 
-        list_tup_value = []
-        iter_ = 100
-        counter = 0
         for index, value in df_identify_summary.iterrows():
-            counter += 1
-
-            if counter % iter_ == 0:
-                ct = datetime.datetime.now()
-                print("[{}] {}".format(ct, counter), flush=True)
-
-            if counter % iter_ == 0:
-
-                ec_id = value['id']
-                assembly_len = value['consensus_len']
-                coverage = value['coverage']
-                ctc = value['ctc']
-                tup_ = (ec_id, assembly_len, coverage, ctc)
-
-                fa_path = "{}/{}/{}_consensus.fa".format(assemGraph, ec_id, ec_id)
-
-                tup_value = (fa_path, tup_)
-                list_tup_value.append(tup_value)
-
-                pool = Pool(processes = threads)
-                exit_codes = pool.map(assemToGFA, list_tup_value)
-                pool.close()
-                pool.join()
-
-                list_tup_value = []
-            else:
-                ec_id = value['id']
-                assembly_len = value['consensus_len']
-                coverage = value['coverage']
-                ctc = value['ctc']
-                tup_ = (ec_id, assembly_len, coverage, ctc)
-
-                fa_path = "{}/{}/{}_consensus.fa".format(assemGraph, ec_id, ec_id)
-
-                tup_value = (fa_path, tup_)
-                list_tup_value.append(tup_value)
-
-        if len(list_tup_value) > 0:
-            pool = Pool(processes = threads)
-            exit_codes = pool.map(assemToGFA, list_tup_value)
-            pool.close()
-            pool.join()
+            ec_id = value['id']
+            assembly_len = value['consensus_len']
+            coverage = value['coverage']
+            ctc = value['ctc']
+            tup_ = (ec_id, assembly_len, coverage, ctc)
+            fa_path = "{}/{}/{}_consensus.fa".format(assemGraph, ec_id, ec_id)
+            assemToGFA((fa_path, tup_))
 
     ct = datetime.datetime.now()
     print("[{}] finished identifying process\n".format(ct), flush=True)

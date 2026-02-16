@@ -1,17 +1,16 @@
 #!/usr/bin/env python
-import mappy
 import datetime
 import pathlib
 import subprocess
+import tempfile
 import intervaltree as tree
 import argparse, re, sys
 import pandas as pd
 import numpy as np
 from os import path
-from tqdm import tqdm
-from itertools import chain
+from pathlib import Path
 from collections import Counter, namedtuple
-from multiprocessing import cpu_count, Pool
+from multiprocessing import cpu_count
 from Bio import SeqIO
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
@@ -31,49 +30,68 @@ PLATFORM_CONFIG = {
     }
 }
 
+
+def _run_minimap2_paf(input_fastx, reference_mmi, preset, threads, mapq_threshold, exclude_chrs):
+    """Run minimap2 subprocess and parse PAF output into per-read hit lists.
+
+    Returns a dict mapping read name to its list of hits, where each hit is
+    [readid, q_len, q_st, q_en, ctg, r_st, r_en, mlen, blen, mapq, strand].
+    """
+    exclude_set = set(exclude_chrs)
+
+    with tempfile.NamedTemporaryFile(suffix=".paf", delete=False) as tmp:
+        paf_path = Path(tmp.name)
+
+    try:
+        cmd = [
+            "minimap2",
+            "-x", preset,
+            "-c",
+            "-t", str(threads),
+            "--no-long-join",
+            "--secondary=no",
+            "-o", str(paf_path),
+            str(reference_mmi),
+            str(input_fastx),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        hits_by_read = {}
+        with open(paf_path) as fh:
+            for line in fh:
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) < 12:
+                    continue
+                mapq = int(cols[11])
+                if mapq < mapq_threshold:
+                    continue
+                ctg = cols[5]
+                if ctg in exclude_set:
+                    continue
+
+                qname = cols[0]
+                q_len = int(cols[1])
+                q_st = int(cols[2])
+                q_en = int(cols[3])
+                strand = 1 if cols[4] == "+" else -1
+                r_st = int(cols[7])
+                r_en = int(cols[8])
+                mlen = int(cols[9])
+                blen = int(cols[10])
+
+                hit = [qname, q_len, q_st, q_en, ctg, r_st, r_en, mlen, blen, mapq, strand]
+                hits_by_read.setdefault(qname, []).append(hit)
+
+        return hits_by_read
+    finally:
+        paf_path.unlink(missing_ok=True)
+
+
 def cal_feature_region(value, ini_start):
     str_ = (value['acc_length'] + ini_start) - value['length']
     end_ = value['acc_length'] + ini_start
     return_str = "{}-{}".format(str_, end_)
     return return_str
-
-def getNonOverlap(ref, name, seq, mapq, list_ex_chr):
-    refDict = {}
-    mergedRead = {}
-    i=0
-    nonOvl = []
-    fst = True
-    for hit in ref.map(seq): # alignments
-        if hit.is_primary and hit.mapq >= mapq and not hit.ctg in list_ex_chr:
-            if fst:
-                q_st_fst = hit.q_st
-                q_en_fst = hit.q_en
-                r_st_fst = hit.r_st
-                r_en_fst = hit.r_en
-                fst = False
-                refDict.setdefault(hit.ctg, tree.IntervalTree()).add(tree.Interval(hit.r_st, hit.r_en))
-                nonOvl.append([name,hit.q_st,hit.q_en, hit.ctg, hit.r_st, hit.r_en, hit.mlen, hit.blen, hit.mapq, hit.strand])
-            else:
-                if hit.ctg in refDict:
-                    checkOvl = refDict[hit.ctg].overlaps(hit.r_st, hit.r_en) 
-                else:
-                    checkOvl = False
-                if checkOvl:
-                    for region in refDict[hit.ctg][hit.r_st:hit.r_en]:
-                        st = region.begin
-                        en = region.end
-                        sdata = sorted([hit.r_st, hit.r_en, st, en])
-                        ovl = sdata[2]-sdata[1]
-                        lenR = en-st
-                        lenQ = hit.r_en-hit.r_st
-                        covR = ovl/float(lenR)
-                        covQ = ovl/float(lenQ)
-                        if covQ < 0.05:
-                            refDict.setdefault(hit.ctg, tree.IntervalTree()).add(tree.Interval(hit.r_st, hit.r_en, i))
-                            nonOvl.append([name,hit.q_st,hit.q_en, hit.ctg, hit.r_st, hit.r_en, hit.mlen, hit.blen, hit.mapq, hit.strand])
-                else:
-                    nonOvl.append([name,hit.q_st,hit.q_en, hit.ctg, hit.r_st, hit.r_en, hit.mlen, hit.blen, hit.mapq, hit.strand])
-    return nonOvl
 
 def getMerge(nonOvl_o, gap_len=10):
 
@@ -91,14 +109,14 @@ def getMerge(nonOvl_o, gap_len=10):
             this_nonOvl_o.append(mod_row)
     else:
         this_nonOvl_o = nonOvl_o
-            
+
     newNonOvl = []
     mergedRead = tree.IntervalTree()
-    for row in this_nonOvl_o: 
+    for row in this_nonOvl_o:
         mergedRead.add(tree.Interval(row[1], row[2]))
 
     mergedRead.merge_overlaps()
-    
+
     read_mapped_pos = mergedRead[nonOvl_o[0][1]:nonOvl_o[0][2]]
     read_mapped_pos_begin = list(read_mapped_pos)[0].begin
     read_mapped_pos_end = list(read_mapped_pos)[0].end
@@ -107,7 +125,7 @@ def getMerge(nonOvl_o, gap_len=10):
     return_end = read_mapped_pos_end - gap_len if read_mapped_pos_end != max_end else read_mapped_pos_end
 
     return_read_mapped_pos = tree.Interval(return_start, return_end)
-    
+
     newNonOvl = []
     for row in this_nonOvl_o:
         if row[1] + gap_len == return_read_mapped_pos.begin:
@@ -163,7 +181,7 @@ def combine_region_strand(value):
 def make_mappedRegion(value):
     mappedRegion = "{}_{}_{}".format(value['ref'], value['r_start'], value['r_end'])
     return mappedRegion
-    
+
 def is_overlapping(obj, offset, chrom, start, end):
     list_bool = [False, False]
     if obj.chrom == chrom:
@@ -184,7 +202,7 @@ def split_list_step_window(list_check, step, window):
 
 
 def make_group_order(list_test, offset):
-    
+
     list_group_order = []
     list_group = []
 
@@ -218,12 +236,12 @@ def make_group_order(list_test, offset):
 
                 mod_region = "{}_{}_{}_{}".format(chrom, start, end, strand)
                 list_group_order.append(mod_region)
-                
+
     return list_group_order
 
 
 def get_sum_pattern(list_group_order):
-    
+
     list_sum_pattern = []
 
     list_most_common = Counter(list_group_order).most_common()
@@ -251,7 +269,7 @@ def get_sum_pattern(list_group_order):
                             list_sum_pattern = [True, tup_[0], tup_[1]]
     else:
         list_sum_pattern = [False, '', 0]
-    
+
     return list_sum_pattern
 
 def get_idx_longest_pattern(list_group_order, list_pattern_region):
@@ -287,19 +305,12 @@ def get_idx_longest_pattern(list_group_order, list_pattern_region):
     return max(list_merge_idx_pattern, key=len)
 
 
-def check_read_pattern(ref, name, seq, mapq, list_ex_chr):
+def check_read_pattern(name, list_hit):
 
     list_result = []
-    len_seq = len(seq)
-
-    list_hit = []
-    for hit in ref.map(seq):
-        if hit.is_primary and hit.mapq >= mapq and not hit.ctg in list_ex_chr:
-            list_local_hit = [name, hit.is_primary, hit.mapq, len_seq, hit.q_st, hit.q_en, hit.ctg, hit.r_st, hit.r_en, hit.mlen, hit.blen, hit.strand]
-            list_hit.append(list_local_hit)
 
     if len(list_hit) > 1:
-        header = ['readid', 'is_primary', 'mapq', 'q_len', 'q_start', 'q_end', 'ref', 'r_start', 'r_end', 'matchLen', 'blockLen','strand']
+        header = ['readid', 'q_len', 'q_start', 'q_end', 'ref', 'r_start', 'r_end', 'matchLen', 'blockLen', 'mapq', 'strand']
         df_mapping = pd.DataFrame(list_hit, columns=header)
 
         df_mapping['mappedRegion'] = df_mapping.apply(combine_region_strand, axis=1)
@@ -313,31 +324,24 @@ def check_read_pattern(ref, name, seq, mapq, list_ex_chr):
         list_idx_pattern = []
 
         if list_sum_pattern[0]:
-            
+
             list_pattern_region = list_sum_pattern[1].split(',')
             list_idx_pattern = get_idx_longest_pattern(list_group_order, list_pattern_region)
 
             if len(list_idx_pattern) > len(list_pattern_region):
-                
+
                 selected_cols = ['readid', 'q_len', 'q_start', 'q_end', 'ref', 'r_start', 'r_end', 'matchLen', 'blockLen', 'mapq', 'strand']
                 df_mod_mapping = df_mapping[df_mapping.index.isin(list_idx_pattern)][selected_cols].copy()
                 df_mod_mapping['qlenTrimmed'] = df_mod_mapping['q_end'].tolist()[-1] - df_mod_mapping['q_start'].tolist()[0]
 
                 list_result = df_mod_mapping.values.tolist()
-            
+
     return list_result
 
 
-def getMergeAll(ref, name, seq, mapq, list_ex_chr, allow_gap, allow_overlap):
+def getMergeAll(name, list_hit, allow_gap, allow_overlap):
 
     list_merged_result = []
-    len_seq = len(seq)
-
-    list_hit = []
-    for hit in ref.map(seq):
-        if hit.is_primary and hit.mapq >= mapq and not hit.ctg in list_ex_chr:
-            list_local_hit = [name, len_seq, hit.q_st, hit.q_en, hit.ctg, hit.r_st, hit.r_en, hit.mlen, hit.blen, hit.mapq, hit.strand]
-            list_hit.append(list_local_hit)
 
     if len(list_hit) > 0:
         header = ['readid', 'q_len', 'q_start', 'q_end', 'ref', 'r_start', 'r_end', 'matchLen', 'blockLen', 'mapq','strand']
@@ -359,11 +363,11 @@ def getMergeAll(ref, name, seq, mapq, list_ex_chr, allow_gap, allow_overlap):
             list_result_obj = [list_init_obj[0]]
 
             for idx, obj_ in enumerate(list_init_obj[1:], start=1):
-                
+
                 #### deletion compensation
 
                 if any_overlapping_range(list_result_obj[-1].q_start, list_result_obj[-1].q_end, obj_.q_start, obj_.q_end):
-                    
+
                     if abs(list_result_obj[-1].q_end - obj_.q_start) >= allow_overlap:
 
                         if (list_result_obj[-1].ref == obj_.ref) and (list_result_obj[-1].strand == obj_.strand):
@@ -384,15 +388,15 @@ def getMergeAll(ref, name, seq, mapq, list_ex_chr, allow_gap, allow_overlap):
                     else:
                         list_result_obj.append(obj_)
                 else:
-                    
-                    #### insertion compensation   
-                    
+
+                    #### insertion compensation
+
                     if any_overlapping_range(list_result_obj[-1].q_start, list_result_obj[-1].q_end + allow_gap, obj_.q_start, obj_.q_end):
-                        
+
                         if (list_result_obj[-1].ref == obj_.ref) and (list_result_obj[-1].strand == obj_.strand):
 
                             if abs(list_result_obj[-1].r_end - obj_.r_start) <= 1000:
-                            
+
                                 series_new = pd.Series([obj_.readid, obj_.q_len, min(list_result_obj[-1].q_start, obj_.q_start), max(list_result_obj[-1].q_end, obj_.q_end),
                                                         obj_.ref, min(list_result_obj[-1].r_start, obj_.r_start), max(list_result_obj[-1].r_end, obj_.r_end),
                                                         max(list_result_obj[-1].matchLen, obj_.matchLen), max(list_result_obj[-1].blockLen, obj_.blockLen),
@@ -407,37 +411,33 @@ def getMergeAll(ref, name, seq, mapq, list_ex_chr, allow_gap, allow_overlap):
             list_merged_result = [obj.get_list_attr() for obj in list_result_obj]
         else:
             list_merged_result = df_mapping.values.tolist()
-        
+
     return list_merged_result
 
 
-def cal_pattern_trim(record):
-    global ref
-    global mapq
-    global list_ex_chr
-    global allow_gap
-    global allow_overlap
-    
+def _process_read_hits(name, list_hit, allow_gap, allow_overlap):
+    """Process pre-computed hits for a single read (pattern detection + merge).
+
+    Replaces cal_pattern_trim: receives hits from minimap2 PAF instead of
+    calling mappy via ref.map().
+    """
     list_result = []
-    
-    name = record.id
-    seq = str(record.seq)
-    
-    list_chk_pattern = check_read_pattern(ref, name, seq, mapq, list_ex_chr)
+
+    list_chk_pattern = check_read_pattern(name, list_hit)
     if len(list_chk_pattern) > 0:
         for idx, rTab in enumerate(list_chk_pattern, start=0):
             oTab = rTab+["{:.2f}".format((rTab[3]-rTab[2])/rTab[11]), idx, True]
             list_result.append(oTab)
     else:
-        list_merged_result = getMergeAll(ref, name, seq, mapq, list_ex_chr, allow_gap, allow_overlap)
+        list_merged_result = getMergeAll(name, list_hit, allow_gap, allow_overlap)
         if len(list_merged_result) > 0:
-            
+
             len_trim_read = list_merged_result[-1][3] - list_merged_result[0][2]
 
             for idx, rTab in enumerate(list_merged_result, start=0):
                 oTab = rTab+[len_trim_read, "{:.2f}".format( (rTab[3] - rTab[2]) / len_trim_read ), idx, False]
                 list_result.append(oTab)
-                    
+
     return list_result
 
 
@@ -454,16 +454,16 @@ def argparser():
                             help="input fasta/fastq",
                             type=str, default=None)
     general.add_argument('-mapq', "--map-quality", dest='mapq',
-                            help="mapping quality (default: 30 for ONT, 60 for HiFi)",
+                            help="mapping quality [30]",
                             type=int, default=None)
     general.add_argument('-t', "--threads", dest='threads',
                             help="Number of threads [all CPU cores]",
                             type=int, default=0)
     general.add_argument('-g', "--gap", dest='allow_gap',
-                            help="allowing gap length (default: 10 for ONT, 5 for HiFi)",
+                            help="allowing gap length [10]",
                             type=int, default=None)
     general.add_argument('-l', "--overlap", dest='allow_overlap',
-                            help="allowing overlapping length (default: 10 for ONT, 5 for HiFi)",
+                            help="allowing overlapping length [10]",
                             type=int, default=None)
     general.add_argument('-e', "--exclude", dest='ex_chr',
                             help="exclude chromosome(s) separating with comma [None]",
@@ -481,13 +481,6 @@ def main(args):
     if not args.fqinput:
         sys.stderr.write("[ABORT] Fastq reads are needed\n")
         exit(1)
-
-    global ref
-    global mapq
-    global list_ex_chr
-    global allow_gap
-    global allow_overlap
-    global platform
 
     # Get platform configuration
     platform = args.platform
@@ -519,9 +512,7 @@ def main(args):
 
     oname_map = "{}/trim.txt".format(args.output)
 
-    list_record = []
-    iter_ = 10000
-    flag = 0
+    minimap2_preset = config["minimap2_preset"]
 
     print("\n######### CReSIL : start trimming process (platform: {}, thread: {})".format(platform.upper(), threads), flush=True)
 
@@ -537,74 +528,33 @@ def main(args):
 
         ct = datetime.datetime.now()
         print("[{}] finised indexing an input file".format(ct), flush=True)
-    
+
     numSeq = readFaidx(fname)
 
     ct = datetime.datetime.now()
     print("[{}] total read : {}".format(ct, numSeq), flush=True)
 
-    ## load Aligner ############################################################
-
-    MM_F_NO_LJOIN = 0x400
-    minimap2_preset = config["minimap2_preset"]
-    ref = mappy.Aligner(fref, preset=minimap2_preset, extra_flags=MM_F_NO_LJOIN)  # load or build index
-    if not ref:
-        raise Exception("ERROR: failed to load/build index")
+    ## minimap2 alignment ######################################################
 
     ct = datetime.datetime.now()
     print("[{}] using minimap2 preset: {}".format(ct, minimap2_preset), flush=True)
 
+    hits_by_read = _run_minimap2_paf(fname, fref, minimap2_preset, threads, mapq, list_ex_chr)
+
+    ct = datetime.datetime.now()
+    print("[{}] minimap2 done, {} reads with alignments".format(ct, len(hits_by_read)), flush=True)
+
     ## trimming process ########################################################
-    
-    for counter, record in enumerate(SeqIO.parse(fname, filetype), start=1):
-        
-        if counter % iter_ == 0:
-            ct = datetime.datetime.now()
-            print("[{}] {}".format(ct, counter), flush=True)
-        
-        if counter % iter_ == 0:
-            
-            list_record.append(record)
-            
-            pool = Pool(processes = threads)
-            list_pool_result = pool.map(cal_pattern_trim, list_record)
-            pool.close()
-            pool.join()
-            
-            list_result = list(chain.from_iterable(list_pool_result))
-            
-            list_cols = ['readid', 'q_len', 'q_start', 'q_end', 'ref', 'r_start', 'r_end',
-                        'match', 'mapBlock', 'mapq', 'strand', 'qlenTrimmed', 'freqCov', 'order', 'CTC']
-            df_trim = pd.DataFrame(list_result, columns=list_cols)
-            
-            if flag == 0:
-                df_trim.to_csv(oname_map, sep='\t', mode='w', header=True, index=None)
-                flag = 1
-            else:
-                df_trim.to_csv(oname_map, sep='\t', mode='a', header=False, index=None)
-                
-            list_record = []
-        else:
-            list_record.append(record)
-                
-    if len(list_record) > 0:
 
-        pool = Pool(processes = threads)
-        list_pool_result = pool.map(cal_pattern_trim, list_record)
-        pool.close()
-        pool.join()
-        
-        list_result = list(chain.from_iterable(list_pool_result))
-        
-        list_cols = ['readid', 'q_len', 'q_start', 'q_end', 'ref', 'r_start', 'r_end',
-                    'match', 'mapBlock', 'mapq', 'strand', 'qlenTrimmed', 'freqCov', 'order', 'ctc_read']
-        df_trim = pd.DataFrame(list_result, columns=list_cols)
+    all_results = []
+    for name, list_hit in hits_by_read.items():
+        result = _process_read_hits(name, list_hit, allow_gap, allow_overlap)
+        all_results.extend(result)
 
-        if path.exists(oname_map):
-            df_trim.to_csv(oname_map, sep='\t', mode='a', header=False, index=None)
-        else:
-            df_trim.to_csv(oname_map, sep='\t', mode='w', header=True, index=None)
+    list_cols = ['readid', 'q_len', 'q_start', 'q_end', 'ref', 'r_start', 'r_end',
+                'match', 'mapBlock', 'mapq', 'strand', 'qlenTrimmed', 'freqCov', 'order', 'ctc_read']
+    df_trim = pd.DataFrame(all_results, columns=list_cols)
+    df_trim.to_csv(oname_map, sep='\t', mode='w', header=True, index=None)
 
     ct = datetime.datetime.now()
     print("[{}] finished trimming process\n".format(ct), flush=True)
-

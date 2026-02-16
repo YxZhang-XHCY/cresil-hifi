@@ -32,7 +32,6 @@ setup(
     python_requires='>=3.8',
     install_requires=[
         'biopython>=1.81',
-        'mappy>=2.26',
         'intervaltree>=3.1.0',
         'tqdm>=4.66.1',
         'pandas>=2.0.3',
