@@ -52,9 +52,8 @@ def format_merge_region(merge_region):
 def draw_graph(graph, filename="test"):
     import graphviz as gv
     d = gv.Digraph(name=filename)
-    for k in graph:
-        node = eval(k)
-        d.edge(node[0], node[1], label=str(graph[k]))
+    for pair, weight in graph.items():
+        d.edge(pair[0], pair[1], label=str(weight))
     d.render()
     return filename
 
@@ -98,17 +97,15 @@ def chk_circular_subgraph(G, graph, dict_pair_strand):
         rm_sl_subgraph = graph.copy()
         rm_sl_subgraph.remove_edges_from(nx.selfloop_edges(rm_sl_subgraph))
         solved = all(x <= 2 for x in [rm_sl_subgraph.degree[node] for node in list_nodes])
-        key_forward = repr(list_nodes)
-        key_reverse = repr(list_nodes[::-1])
+        key_forward = tuple(list_nodes)
+        key_reverse = tuple(list_nodes[::-1])
         cyclic = False
-        if all(x in dict_pair_strand.keys() for x in [key_forward, key_reverse]):
+        if key_forward in dict_pair_strand and key_reverse in dict_pair_strand:
             for fstrands in dict_pair_strand[key_forward]:
-                fl, fr  = fstrands.split('_')
-                key_check = "{}{}{}".format(fr, key_reverse ,fl)
+                fl, fr = fstrands.split('_')
                 for rstrands in dict_pair_strand[key_reverse]:
-                    rl, rr  = rstrands.split('_')
-                    key_reverse_check = "{}{}{}".format(rl, key_reverse ,rr)
-                    if key_check == key_reverse_check:
+                    rl, rr = rstrands.split('_')
+                    if fr == rl and fl == rr:
                         cyclic = True
                         break
     elif num_nodes > 2:
@@ -290,21 +287,22 @@ def prepare_identify_seq(tup_value):
     total_base = 0
     list_readid = []
 
+    nodes = [node[:-2] for node in merge_region.split(',')]
+    mask = read_merged_ins_df['mergeid'].isin(nodes)
+    filtered = read_merged_ins_df.loc[mask]
+
     out_filename_final = "{}/final_reads.fa".format(assemFol)
     with open(out_filename_final, mode='w') as foutF:
-        for node in merge_region.split(','):
-            l1 = read_merged_ins_df['mergeid'] == node[:-2]
-            readO = read_merged_ins_df[l1].copy()
-            for readO_idx, readO_row in readO.iterrows():
-                readO_readid = str(readO_row['readid'])
-                readO_start = readO_row['q_start']
-                readO_end = readO_row['q_end']
-                readO_name = "{}_{}_{}_{}".format(gname, readO_readid, readO_start, readO_end)
-                readO_seq = str(fa_reads.fetch(readO_readid, readO_start, readO_end)).upper()
-                foutF.write(">{}\n{}\n".format(readO_name, readO_seq))
+        for row in filtered.itertuples():
+            readO_readid = str(row.readid)
+            readO_start = row.q_start
+            readO_end = row.q_end
+            readO_name = "{}_{}_{}_{}".format(gname, readO_readid, readO_start, readO_end)
+            readO_seq = str(fa_reads.fetch(readO_readid, readO_start, readO_end)).upper()
+            foutF.write(">{}\n{}\n".format(readO_name, readO_seq))
 
-                total_base += len(readO_seq)
-                list_readid.append(readO_readid)
+            total_base += len(readO_seq)
+            list_readid.append(readO_readid)
 
     expectCov = "{:.2f}".format((float(total_base) / lengthLoci))
 
@@ -376,8 +374,6 @@ def main(args):
     config = PLATFORM_CONFIG[platform]
 
     threads = cpu_count() if args.threads == 0 else args.threads
-    adj_threads = max(4, int(threads / 4))
-    bed_threads = max(4, int(threads / 5))
     mode = 'linkage' if args.mode == 'linkage' else 'depth'
     fref = args.ref
     fastaRef = args.faref
@@ -592,8 +588,8 @@ def main(args):
     merge_genomecov_df_filt = merge_genomecov_df[merge_genomecov_df['depth'] >= regiondepth]
     merge_genomecov_df = merge_genomecov_df.sort_values(['mergeid','bg_start'])
     ## group reads coverage of each mergeid and calculate mean coverage
-    merge_bg_filt = merge_genomecov_df_filt.groupby(['mergeid']).agg({'bg_chrom': np.max,'bg_start' : np.min,
-                                                           'bg_end' : np.max,'depth' : np.mean}).reset_index()
+    merge_bg_filt = merge_genomecov_df_filt.groupby(['mergeid']).agg(
+        {'bg_chrom': 'max', 'bg_start': 'min', 'bg_end': 'max', 'depth': 'mean'}).reset_index()
     ## create final potential eccDNA regions and 
     ## re-create mergeid based on trimming low-coverage regions
     merge_bg_filt[['bg_start','bg_end']] = merge_bg_filt[['bg_start','bg_end']].apply(pd.to_numeric, errors='coerce')
@@ -636,18 +632,16 @@ def main(args):
     ## Annotate 5'end and 3'end region of each readid ###################
 
     ## collect 200bp from 5'end and 3'end of each potential eccDNA
-    end5 = open("{}/end5_merge_region.bed".format(tmpDir),'w')
-    end3 = open("{}/end3_merge_region.bed".format(tmpDir),'w')
-    for idx_, row in merge_bg_filt.iterrows():
-        chrom = row.bg_chrom
-        start = row.bg_start
-        end = row.bg_end
-        end_size = check_ovl_size if minrsize >= 200 else int(round(minrsize * 0.3, 0))
-        end_size = end_size if end_size >= 15 else 15
-        end5.write("{}\n".format("\t".join(map(str, [chrom, start, int(start) + end_size]))))
-        end3.write("{}\n".format("\t".join(map(str, [chrom, int(end) - end_size, end]))))
-    end5.close()
-    end3.close()
+    end_size = check_ovl_size if minrsize >= 200 else int(round(minrsize * 0.3, 0))
+    end_size = max(end_size, 15)
+    with open("{}/end5_merge_region.bed".format(tmpDir), 'w') as end5, \
+         open("{}/end3_merge_region.bed".format(tmpDir), 'w') as end3:
+        for row in merge_bg_filt.itertuples():
+            chrom = row.bg_chrom
+            start = row.bg_start
+            end = row.bg_end
+            end5.write("{}\t{}\t{}\n".format(chrom, start, int(start) + end_size))
+            end3.write("{}\t{}\t{}\n".format(chrom, int(end) - end_size, end))
     bt_5end = bt.BedTool("{}/end5_merge_region.bed".format(tmpDir))
     bt_3end = bt.BedTool("{}/end3_merge_region.bed".format(tmpDir))
     ## Annotate each read that has 5'end and 3'end overlap
@@ -673,35 +667,30 @@ def main(args):
     graph = {}
 
     for readid, group in read_merged_ins_df.groupby(by='readid'):
-        
-        df_check = group.sort_values(by='order').copy()
+
+        df_check = group.sort_values(by='order')
         df_check.reset_index(drop=True, inplace=True)
-        
+
         if len(df_check) > 1:
             for tup_result in check_breakpoint_direction(df_check):
                 if tup_result[3] == True:
 
-                    repr_mergeid = repr([tup_result[0], tup_result[1]])
-                    
-                    if repr_mergeid in dict_pair_strand.keys():
-                        dict_pair_strand[repr_mergeid].add(tup_result[2])
-                    else:
-                        dict_pair_strand[repr_mergeid] = set()
-                        dict_pair_strand[repr_mergeid].add(tup_result[2])
+                    pair = (tup_result[0], tup_result[1])
 
-                    if repr_mergeid in graph.keys():
-                        graph[repr_mergeid] += 1
+                    if pair in dict_pair_strand:
+                        dict_pair_strand[pair].add(tup_result[2])
                     else:
-                        graph[repr_mergeid] = 1
+                        dict_pair_strand[pair] = {tup_result[2]}
+
+                    graph[pair] = graph.get(pair, 0) + 1
 
     ## filter graphs with low breakpoints
     graphFilt = {k: v for k, v in graph.items() if v >= breakpointdepth}
 
     ## create all graph objects
     G = nx.MultiDiGraph()
-    for k in graphFilt:
-        nodes = eval(k)
-        G.add_edge(nodes[0], nodes[1], weight = graphFilt[k])
+    for pair, weight in graphFilt.items():
+        G.add_edge(pair[0], pair[1], weight=weight)
 
     ## create list of subgraphs
     subgraphs = list(connected_component_subgraphs(G.to_undirected()))
@@ -719,23 +708,23 @@ def main(args):
         regions, num_nodes, can_be_solved, contain_selfloop, is_cyclic = chk_circular_subgraph(G, graph, dict_pair_strand)
         
         if len(nodes) == 1:
-            select_repr = repr([nodes[0], nodes[0]])
-            regions = "{}_{}".format(eval(select_repr)[0], list(dict_pair_strand[select_repr])[0][0])
+            pair = (nodes[0], nodes[0])
+            regions = "{}_{}".format(pair[0], list(dict_pair_strand[pair])[0][0])
 
         elif len(nodes) == 2:
-            select_repr = repr(nodes)
-            list_region = eval(select_repr)
-            
-            if not select_repr in dict_pair_strand.keys():
-                select_repr = repr(nodes[::-1])
-                
-            list_strand = list(dict_pair_strand[select_repr])[0].split('_')
-            regions = ','.join("{}_{}".format(x[0], x[1]) for x in list(zip(list_region, list_strand)))
-            
+            pair = tuple(nodes)
+            list_region = list(pair)
+
+            if pair not in dict_pair_strand:
+                pair = tuple(nodes[::-1])
+
+            list_strand = list(dict_pair_strand[pair])[0].split('_')
+            regions = ','.join("{}_{}".format(x[0], x[1]) for x in zip(list_region, list_strand))
+
         else:
             test_graph = graph.copy()
             test_graph.remove_edges_from(nx.selfloop_edges(test_graph))
-            
+
             list_traversal = nx.cycle_basis(nx.DiGraph(test_graph).to_undirected())
             if len(list_traversal) == 0:
                 regions = ','.join(["{}_{}".format(node, dict_majority_strand[node]) for node in nodes])
@@ -743,37 +732,35 @@ def main(args):
             else:
                 list_traversal = list_traversal[0]
 
-                list_order_check = [(i , i+1) for i in list(range(len(list_traversal))) if i + 1 < len(list_traversal)]
+                list_order_check = [(i, i+1) for i in range(len(list_traversal)) if i + 1 < len(list_traversal)]
 
                 list_temp_all = []
                 for tup_check in list_order_check:
                     l_region = list_traversal[tup_check[0]]
                     r_region = list_traversal[tup_check[1]]
-                    repr_mergeid = repr([l_region, r_region])
+                    pair = (l_region, r_region)
 
                     list_this_level = []
 
-                    if repr_mergeid in dict_pair_strand.keys():
-
-                        for str_strand in list(dict_pair_strand[repr_mergeid]):
-                            list_str_strand = ['_'.join(x) for x in list(zip([l_region, r_region], str_strand.split('_')))]
+                    if pair in dict_pair_strand:
+                        for str_strand in dict_pair_strand[pair]:
+                            list_str_strand = ['_'.join(x) for x in zip([l_region, r_region], str_strand.split('_'))]
                             list_this_level.append(list_str_strand)
                     else:
-                        rev_repr_mergeid = repr([r_region, l_region])
-
-                        for str_strand in [ reverse_strand(x) for x  in list(dict_pair_strand[rev_repr_mergeid]) ]:
-                            list_str_strand = ['_'.join(x) for x in list(zip([l_region, r_region], str_strand.split('_')))]
+                        rev_pair = (r_region, l_region)
+                        for str_strand in [reverse_strand(x) for x in dict_pair_strand[rev_pair]]:
+                            list_str_strand = ['_'.join(x) for x in zip([l_region, r_region], str_strand.split('_'))]
                             list_this_level.append(list_str_strand)
 
                     list_temp_all.append(list_this_level)
 
-
                 list_traverse = list_temp_all[0]
                 for list_level in list_temp_all[1:]:
+                    tail_to_idx = {tl[-1]: i for i, tl in enumerate(list_traverse)}
                     for list_ in list_level:
-                        for index, list_traverse_level in enumerate(list_traverse, start=0):
-                            if list_[0] == list_traverse_level[-1]:
-                                list_traverse[index].append(list_[1])
+                        idx = tail_to_idx.get(list_[0])
+                        if idx is not None:
+                            list_traverse[idx].append(list_[1])
 
                 regions = ','.join(max(list_traverse, key=len))
         
@@ -791,49 +778,21 @@ def main(args):
     ct = datetime.datetime.now()
     print("[{}] preparing data from subGraphs : {}".format(ct, len(subgraphs)), flush=True)
 
-    list_identify_results = []
     list_tup_value = []
-    iter_ = 100
+    for row in df_graph_summary.itertuples():
+        tup_value = (row.id, row.regions, row.num_nodes, row.is_cyclic, assemGraph, fastaRef, fastaName)
+        list_tup_value.append(tup_value)
 
-    for counter, (idx, value) in enumerate(df_graph_summary.iterrows(), start=1):
-
-        if counter % iter_ == 0:
+    total_subgraphs = len(list_tup_value)
+    list_identify_results = []
+    pool = Pool(processes=threads)
+    for i, result in enumerate(pool.imap_unordered(prepare_identify_seq, list_tup_value), 1):
+        if i % 100 == 0 or i == total_subgraphs:
             ct = datetime.datetime.now()
-            print("[{}] {}".format(ct, counter), flush=True)
-
-        if counter % iter_ == 0:
-            gname = value['id']
-            merge_region = value['regions']
-            num_region = value['num_nodes']
-            is_cyclic = value['is_cyclic']
-
-            tup_value = (gname, merge_region, num_region, is_cyclic, assemGraph, fastaRef, fastaName)
-            list_tup_value.append(tup_value)
-
-            pool = Pool(processes = bed_threads)
-            list_pool_result = pool.map(prepare_identify_seq, list_tup_value)
-            pool.close()
-            pool.join()
-
-            list_identify_results += list(chain.from_iterable(list_pool_result))
-
-            list_tup_value = []
-        else:
-            gname = value['id']
-            merge_region = value['regions']
-            num_region = value['num_nodes']
-            is_cyclic = value['is_cyclic']
-
-            tup_value = (gname, merge_region, num_region, is_cyclic, assemGraph, fastaRef, fastaName)
-            list_tup_value.append(tup_value)
-
-    if len(list_tup_value) > 0:
-        pool = Pool(processes = bed_threads)
-        list_pool_result = pool.map(prepare_identify_seq, list_tup_value)
-        pool.close()
-        pool.join()
-
-        list_identify_results += list(chain.from_iterable(list_pool_result))
+            print("[{}] preparing subgraphs: {}/{}".format(ct, i, total_subgraphs), flush=True)
+        list_identify_results += list(result)
+    pool.close()
+    pool.join()
 
     ## write a subGraph summary file
     header = ['id', 'merge_region', 'merge_len', 'num_region', 'ctc', 'numreads', 'totalbase', 'coverage']

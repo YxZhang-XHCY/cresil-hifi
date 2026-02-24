@@ -355,8 +355,8 @@ def getMergeAll(name, list_hit, allow_gap, allow_overlap):
             #### make initial hit objects
 
             list_init_obj = []
-            for index, value in df_mapping.iterrows():
-                list_init_obj.append(pdRegion(value))
+            for row in df_mapping.itertuples():
+                list_init_obj.append(pdRegion(row))
 
             #### merge overlapping regions
 
