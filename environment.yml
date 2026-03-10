@@ -1,4 +1,4 @@
-name: cresil
+name: cresil-hifi
 channels:
   - conda-forge
   - bioconda
